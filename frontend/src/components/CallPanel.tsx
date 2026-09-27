@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Send, Code2, AlertCircle } from "lucide-react";
 import {
   buildAbiArguments,
@@ -9,6 +9,7 @@ import {
   type ContractAbiFunction,
 } from "@/utils/contractAbi";
 import WasmSpecFormBuilder from "./WasmSpecFormBuilder";
+import AbiViewer from "./AbiViewer";
 
 interface CallPanelProps {
   onInvoke: (func: string, args: Record<string, unknown>) => void;
@@ -17,7 +18,12 @@ interface CallPanelProps {
   abi?: ContractAbiFunction[];
 }
 
-export default function CallPanel({ onInvoke, isInvoking, contractId, abi }: CallPanelProps) {
+export default function CallPanel({
+  onInvoke,
+  isInvoking,
+  contractId,
+  abi,
+}: CallPanelProps) {
   const [funcName, setFuncName] = useState("");
   const [argsRaw, setArgsRaw] = useState("");
   const [parseError, setParseError] = useState("");
@@ -47,20 +53,20 @@ export default function CallPanel({ onInvoke, isInvoking, contractId, abi }: Cal
     }
 
     const trimmedName = funcName.trim();
-    const selectedAbi = abi?.find((entry) => entry.name === trimmedName) ?? null;
+    const selectedAbi =
+      abi?.find((entry) => entry.name === trimmedName) ?? null;
 
     if (!selectedAbi) {
       setFormValues({});
       return;
     }
 
-    const nextValues = (selectedAbi.inputs ?? []).reduce<Record<string, unknown>>(
-      (values, input) => {
-        values[input.name] = buildDefaultInputValue(input.type);
-        return values;
-      },
-      {},
-    );
+    const nextValues = (selectedAbi.inputs ?? []).reduce<
+      Record<string, unknown>
+    >((values, input) => {
+      values[input.name] = buildDefaultInputValue(input.type);
+      return values;
+    }, {});
 
     setFormValues(nextValues);
   }, [abi, contractId, funcName]);
@@ -94,14 +100,20 @@ export default function CallPanel({ onInvoke, isInvoking, contractId, abi }: Cal
     return abi?.find((entry) => entry.name === trimmedName) ?? null;
   }, [abi, funcName]);
 
-  const abiValidationError = useMemo(() => validateAbiArguments(abiFunction, formValues), [abiFunction, formValues]);
-  const canInvoke = Boolean(contractId && funcName.trim()) && !parseError && (!abiFunction ? !parsedArgs.error : !abiValidationError);
+  const abiValidationError = useMemo(
+    () => validateAbiArguments(abiFunction, formValues),
+    [abiFunction, formValues],
+  );
+  const canInvoke =
+    Boolean(contractId && funcName.trim()) &&
+    !parseError &&
+    (!abiFunction ? !parsedArgs.error : !abiValidationError);
 
-  const handleFieldChange = (name: string, value: unknown) => {
+  const handleFieldChange = useCallback((name: string, value: unknown) => {
     setFormValues((prev) => ({ ...prev, [name]: value }));
-  };
+  }, []);
 
-  const handleInvoke = () => {
+  const handleInvoke = useCallback(() => {
     if (!contractId) {
       setParseError("Deploy a contract before invoking a function.");
       return;
@@ -130,7 +142,15 @@ export default function CallPanel({ onInvoke, isInvoking, contractId, abi }: Cal
     }
 
     onInvoke(trimmedName, parsedArgs.value);
-  };
+  }, [
+    contractId,
+    funcName,
+    abiFunction,
+    formValues,
+    onInvoke,
+    parsedArgs.error,
+    parsedArgs.value,
+  ]);
 
   return (
     <div className="flex flex-col space-y-4 p-5 bg-gray-900 border border-gray-800 rounded-xl shadow-lg mt-4">
@@ -140,11 +160,16 @@ export default function CallPanel({ onInvoke, isInvoking, contractId, abi }: Cal
       </h3>
 
       {!contractId ? (
-        <p className="text-xs text-gray-500 italic">Deploy a contract to enable interactions.</p>
+        <p className="text-xs text-gray-500 italic">
+          Deploy a contract to enable interactions.
+        </p>
       ) : (
         <div className="space-y-4">
           <div>
-            <label htmlFor="call-panel-function-name" className="block text-xs font-semibold text-gray-400 mb-1.5 tracking-wide">
+            <label
+              htmlFor="call-panel-function-name"
+              className="block text-xs font-semibold text-gray-400 mb-1.5 tracking-wide"
+            >
               Function Name
             </label>
             {abi?.length ? (
@@ -174,26 +199,19 @@ export default function CallPanel({ onInvoke, isInvoking, contractId, abi }: Cal
           </div>
 
           {abiFunction && (
-            <div className="space-y-3 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
-              <div className="flex items-center justify-between border-b border-gray-800 pb-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-cyan-300">
-                  WASM Spec Parameter Builder
-                </span>
-                <span className="text-[11px] font-mono text-gray-500">
-                  {abiFunction.inputs?.length ?? 0} Parameters
-                </span>
-              </div>
-              <WasmSpecFormBuilder
-                inputs={abiFunction.inputs ?? []}
-                values={formValues}
-                onChange={handleFieldChange}
-              />
-            </div>
+            <AbiViewer
+              abiFunction={abiFunction}
+              values={formValues}
+              onFieldChange={handleFieldChange}
+            />
           )}
 
           {!abiFunction && (
             <div>
-              <label htmlFor="call-panel-arguments" className="mb-1 block text-xs tracking-wide text-gray-400">
+              <label
+                htmlFor="call-panel-arguments"
+                className="mb-1 block text-xs tracking-wide text-gray-400"
+              >
                 Arguments (JSON)
               </label>
               <textarea
@@ -201,7 +219,11 @@ export default function CallPanel({ onInvoke, isInvoking, contractId, abi }: Cal
                 value={argsRaw}
                 onChange={(event) => setArgsRaw(event.target.value)}
                 aria-invalid={Boolean(parsedArgs.error || parseError)}
-                aria-describedby={parsedArgs.error || parseError ? "call-panel-args-error" : undefined}
+                aria-describedby={
+                  parsedArgs.error || parseError
+                    ? "call-panel-args-error"
+                    : undefined
+                }
                 className="h-24 w-full resize-none rounded-lg border border-gray-800 bg-gray-950 px-3 py-2 font-mono text-sm text-gray-200 focus:outline-none focus:border-cyan-500"
                 placeholder='{\n  "to": "G...",\n  "amount": 100\n}'
               />
@@ -209,7 +231,10 @@ export default function CallPanel({ onInvoke, isInvoking, contractId, abi }: Cal
           )}
 
           {(parseError || parsedArgs.error) && (
-            <p id="call-panel-args-error" className="flex items-center gap-1.5 text-xs text-rose-300">
+            <p
+              id="call-panel-args-error"
+              className="flex items-center gap-1.5 text-xs text-rose-300"
+            >
               <AlertCircle size={14} className="shrink-0" />
               {parseError || parsedArgs.error}
             </p>

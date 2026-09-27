@@ -4,10 +4,15 @@
 import fs from 'fs';
 import path from 'path';
 import { performance } from 'perf_hooks';
+import {
+  getCompileTempRoot,
+  getCompileTempPrefix,
+} from './services/buildSandbox.js';
+import { enforceQuota, getUsage } from './services/diskQuotaManager.js';
 
 const CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const OLD_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
-const TEMP_DIR_PREFIX = '.tmp_compile_';
+const TEMP_DIR_PREFIX = getCompileTempPrefix();
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;
 let intervalId = null;
@@ -84,25 +89,46 @@ async function scanAndCleanupDir(baseDir) {
 }
 
 /**
- * Scans the root and src directories for temporary compilation folders
- * and deletes those older than a specified threshold.
- * Includes comprehensive error handling and monitoring.
+ * Scans the shared compile temp directory for stale build folders and deletes
+ * those older than a threshold. Sweeps the same root+prefix that
+ * compileWorker.js uses, so workspaces orphaned by a killed worker thread or a
+ * process crash are still reclaimed. (issue #1330)
  */
 async function cleanupTempDirectories() {
   console.log('Starting temporary directory cleanup...');
 
-  const rootDir = process.cwd();
-  const srcDir = path.join(rootDir, 'src');
+  const tempRoot = getCompileTempRoot();
+  if (fs.existsSync(tempRoot)) {
+    await scanAndCleanupDir(tempRoot);
 
-  // Scan root directory
-  await scanAndCleanupDir(rootDir);
-
-  // Scan src directory if it exists
-  if (fs.existsSync(srcDir)) {
-    await scanAndCleanupDir(srcDir);
+    // Issue #1570: the age sweep above cannot prevent disk exhaustion on its
+    // own. If builds arrive faster than OLD_THRESHOLD_MS, every workspace is
+    // younger than the threshold, the sweep deletes nothing, and the disk
+    // fills anyway. The quota pass runs second and evicts by total size —
+    // oldest-first, regardless of age — so it only has work to do once the
+    // age sweep has already reclaimed what it can.
+    try {
+      await enforceQuota({ tempRoot });
+    } catch (err) {
+      // Never fatal: a failed quota pass must not stop the interval timer and
+      // leave the age sweep unscheduled too.
+      console.error(`Quota enforcement failed: ${err.message}`);
+    }
+  } else {
+    console.warn(`Compile temp root does not exist: ${tempRoot}`);
   }
 
   console.log('Temporary directory cleanup finished.');
+}
+
+/**
+ * Current compile-temp usage against the configured quota (Issue #1570).
+ *
+ * Exported for the health endpoint: disk pressure is invisible until a build
+ * fails with ENOSPC, and by then the useful diagnostic window has closed.
+ */
+export async function getTempDiskUsage() {
+  return getUsage(getCompileTempRoot());
 }
 
 export function stopCleanupWorker() {

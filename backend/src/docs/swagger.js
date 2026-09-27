@@ -31,9 +31,23 @@ const options = {
     ],
     tags: [
       { name: 'Versioning', description: 'API version discovery and routing' },
-      { name: 'Contract Compiler', description: 'Synchronous and Asynchronous WASM Compilation' },
-      { name: 'Deploy & Invoke', description: 'Contract deployment and invocation operations' },
-      { name: 'RPC Network Manager', description: 'Circuit breaker & RPC health status' },
+      {
+        name: 'Contract Compiler',
+        description: 'Synchronous and Asynchronous WASM Compilation',
+      },
+      {
+        name: 'Deploy & Invoke',
+        description: 'Contract deployment and invocation operations',
+      },
+      {
+        name: 'Contract Verification',
+        description:
+          'Source-to-WASM hash verification for deployed Soroban contracts',
+      },
+      {
+        name: 'RPC Network Manager',
+        description: 'Circuit breaker & RPC health status',
+      },
       ...Object.keys(versions).map((version) => ({
         name: `API ${version}`,
         description: `${version.toUpperCase()} endpoints`,
@@ -45,6 +59,14 @@ const options = {
           type: 'http',
           scheme: 'bearer',
           bearerFormat: 'JWT',
+        },
+      },
+      parameters: {
+        VerificationId: {
+          in: 'path',
+          name: 'id',
+          required: true,
+          schema: { type: 'string' },
         },
       },
       schemas: {
@@ -59,23 +81,80 @@ const options = {
           type: 'object',
           required: ['source'],
           properties: {
-            source: { type: 'string', description: 'Rust source code for Soroban smart contract' },
-            contractName: { type: 'string', description: 'Optional name of the contract' },
+            source: {
+              type: 'string',
+              description: 'Rust source code for Soroban smart contract',
+            },
+            contractName: {
+              type: 'string',
+              description: 'Optional name of the contract',
+            },
           },
         },
         AsyncCompileResponse: {
           type: 'object',
           properties: {
-            jobId: { type: 'string', description: 'Unique background compilation job ID' },
+            jobId: {
+              type: 'string',
+              description: 'Unique background compilation job ID',
+            },
             status: { type: 'string', example: 'queued' },
             createdAt: { type: 'string', format: 'date-time' },
+          },
+        },
+        VerificationRequest: {
+          type: 'object',
+          required: ['contractId', 'sourceCode'],
+          properties: {
+            contractId: {
+              type: 'string',
+              description: 'Stellar Soroban contract ID',
+            },
+            network: { type: 'string', default: 'testnet' },
+            sourceCode: {
+              type: 'string',
+              description: 'Rust source for src/lib.rs',
+            },
+            dependencies: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+            },
+            metadata: { type: 'object' },
+            wasmBase64: {
+              type: 'string',
+              description: 'Optional compiled WASM artifact',
+            },
+            wasmPath: {
+              type: 'string',
+              description:
+                'Optional artifact path inside VERIFICATION_ARTIFACT_ROOT',
+            },
+          },
+        },
+        VerificationRecord: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            contractId: { type: 'string' },
+            network: { type: 'string' },
+            sourceHash: { type: 'string' },
+            wasmHash: { type: 'string', nullable: true },
+            onChainWasmHash: { type: 'string', nullable: true },
+            status: {
+              type: 'string',
+              enum: ['pending', 'verified', 'mismatch', 'failed'],
+            },
+            verified: { type: 'boolean' },
           },
         },
         CompileJobStatus: {
           type: 'object',
           properties: {
             jobId: { type: 'string' },
-            status: { type: 'string', enum: ['queued', 'processing', 'completed', 'failed'] },
+            status: {
+              type: 'string',
+              enum: ['queued', 'processing', 'completed', 'failed'],
+            },
             result: { type: 'object' },
             error: { type: 'string' },
           },
@@ -84,7 +163,10 @@ const options = {
           type: 'object',
           properties: {
             activeEndpoint: { type: 'string' },
-            circuitBreakerState: { type: 'string', enum: ['CLOSED', 'OPEN', 'HALF_OPEN'] },
+            circuitBreakerState: {
+              type: 'string',
+              enum: ['CLOSED', 'OPEN', 'HALF_OPEN'],
+            },
             endpoints: {
               type: 'array',
               items: {
@@ -104,14 +186,14 @@ const options = {
   apis: ['./src/routes/**/*.js', './src/docs/*.doc.js'],
 };
 
-function cloneOperation(operation, version) {
+export function cloneOperation(operation, version) {
   const cloned = JSON.parse(JSON.stringify(operation));
   const tags = new Set([`API ${version}`, ...(cloned.tags || [])]);
   cloned.tags = Array.from(tags);
   return cloned;
 }
 
-function clonePathItem(pathItem, version) {
+export function clonePathItem(pathItem, version) {
   const cloned = JSON.parse(JSON.stringify(pathItem));
   for (const [method, operation] of Object.entries(cloned)) {
     if (operation && typeof operation === 'object') {
@@ -121,7 +203,7 @@ function clonePathItem(pathItem, version) {
   return cloned;
 }
 
-function isVersionablePath(pathName) {
+export function isVersionablePath(pathName) {
   if (!pathName.startsWith('/api/')) return false;
   const pathWithoutApiPrefix = pathName.slice('/api'.length);
   return versionedRoutePrefixes.some(
@@ -131,7 +213,7 @@ function isVersionablePath(pathName) {
   );
 }
 
-function withVersionedDocumentation(spec) {
+export function withVersionedDocumentation(spec) {
   const documentedSpec = {
     ...spec,
     paths: { ...(spec.paths || {}) },

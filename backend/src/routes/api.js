@@ -17,6 +17,7 @@ import eventsRouter from './events.js';
 import patentsRouter from './patents.js';
 import tokenBurnRouter from './tokenBurn.js';
 import oracleRouter from './oracle.js';
+import verificationRouter from './verification.js';
 import {
   versionTransformer,
   requestTransformerV2,
@@ -29,6 +30,7 @@ import {
   negotiateApiVersion,
   rejectUnsupportedUriVersion,
 } from '../middleware/apiVersioning.js';
+import { rateLimitMiddleware } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
 
@@ -43,6 +45,8 @@ router.get('/versions', (req, res) => {
 // v1 Routes
 const v1Router = express.Router();
 v1Router.use(versionTransformer('v1'));
+v1Router.use('/compile', rateLimitMiddleware('compile'));
+v1Router.use('/deploy', rateLimitMiddleware('deploy'));
 v1Router.use('/compile', v1Compile);
 v1Router.use('/deploy', v1Deploy);
 v1Router.use('/invoke', v1Invoke);
@@ -54,6 +58,8 @@ v1Router.use('/lottery', v2Lottery);
 const v2Router = express.Router();
 v2Router.use(versionTransformer('v2'));
 v2Router.use(requestTransformerV2); // Optional: transform v1-style requests to v2 if needed (e.g., if we had a single implementation)
+v2Router.use('/compile', rateLimitMiddleware('compile'));
+v2Router.use('/deploy', rateLimitMiddleware('deploy'));
 v2Router.use('/compile', v2Compile);
 v2Router.use('/deploy', v2Deploy);
 v2Router.use('/invoke', v2Invoke);
@@ -102,6 +108,7 @@ router.use((req, res, next) => {
   return next();
 });
 router.use('/oracle', oracleRouter);
+router.use('/verify', verificationRouter);
 
 // Default to v1 for backward compatibility, while allowing headers such as:
 // Accept: application/vnd.soroban-playground.v2+json

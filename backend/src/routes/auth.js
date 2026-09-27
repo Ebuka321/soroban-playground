@@ -1,8 +1,34 @@
 import express from 'express';
 import authService from '../services/authService.js';
-import { requireAuth } from '../middleware/authMiddleware.js';
-
 const router = express.Router();
+
+export const requireAuth = async (req, res, next) => {
+  try {
+    let token = null;
+
+    if (req.cookies && req.cookies.accessToken) {
+      token = req.cookies.accessToken;
+    } else if (
+      req.headers.authorization &&
+      req.headers.authorization.startsWith('Bearer ')
+    ) {
+      token = req.headers.authorization.split(' ')[1];
+    }
+
+    if (!token) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const decoded = await authService.verifyAccessToken(token);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    if (error.message === 'Token is blacklisted') {
+      return res.status(401).json({ error: 'Token is invalid or blacklisted' });
+    }
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+};
 
 const setCookies = (res, accessToken, refreshToken) => {
   const isProd = process.env.NODE_ENV === 'production';
@@ -25,16 +51,13 @@ const setCookies = (res, accessToken, refreshToken) => {
 router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
-
-    // In a real application, verify username and password against DB.
-    // For this implementation we will accept dummy credentials to demonstrate token rotation.
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password required' });
     }
 
     const dummyUser = { id: 'user_123', username };
-
-    const { accessToken, refreshToken } = authService.generateTokens(dummyUser);
+    const { accessToken, refreshToken } =
+      await authService.generateTokens(dummyUser);
 
     setCookies(res, accessToken, refreshToken);
 
@@ -43,6 +66,40 @@ router.post('/login', async (req, res) => {
       .json({ success: true, message: 'Logged in successfully' });
   } catch (error) {
     return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// SEP-0010 Challenge Generation
+router.get('/challenge', async (req, res) => {
+  const { address } = req.query;
+  if (!address) {
+    return res.status(400).json({ error: 'address query parameter required' });
+  }
+  try {
+    const challenge = await authService.generateStellarChallenge(address);
+    return res.json(challenge);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+});
+
+// SEP-0010 Challenge Verification and Token Issuance
+router.post('/verify', async (req, res) => {
+  const { address, transactionXDR } = req.body;
+  if (!address || !transactionXDR) {
+    return res
+      .status(400)
+      .json({ error: 'address and transactionXDR required' });
+  }
+  try {
+    const tokens = await authService.verifyStellarChallengeAndIssueTokens(
+      address,
+      transactionXDR
+    );
+    setCookies(res, tokens.accessToken, tokens.refreshToken);
+    return res.json({ success: true, ...tokens });
+  } catch (error) {
+    return res.status(401).json({ error: error.message });
   }
 });
 

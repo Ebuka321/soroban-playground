@@ -1,18 +1,25 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
-import * as freighterApi from "@stellar/freighter-api";
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  ReactNode,
+} from "react";
+import {
+  WalletType,
+  ConnectionStatus,
+  WalletAccount,
+  WalletAdapter,
+  walletRegistry,
+} from "@/lib/wallets";
 
-export type WalletType = "freighter" | "albedo" | "xbull" | "rango" | "soroban-wallet";
-export type ConnectionStatus = "idle" | "connecting" | "connected" | "error" | "unavailable";
+export type { WalletType, ConnectionStatus, WalletAccount, WalletAdapter };
 
-export interface WalletAccount {
-  address: string;
-  name?: string;
-  isMultisig?: boolean;
-}
-
-interface WalletContextType {
+export interface WalletContextType {
   activeWallet: WalletType | null;
   activeAccount: string | null;
   address: string | null; // Alias for activeAccount
@@ -23,11 +30,23 @@ interface WalletContextType {
   connect: (type: WalletType, auto?: boolean) => Promise<void>;
   disconnect: () => void;
   switchAccount: (address: string) => void;
-  signTransaction: (xdr: string) => Promise<string | null>;
+  signTransaction: (
+    xdr: string,
+    options?: { networkPassphrase?: string; network?: string },
+  ) => Promise<string | null>;
   isWalletDetected: (type: WalletType) => boolean;
+  retry: () => Promise<void>;
+  lastAttemptedWallet: WalletType | null;
+  adapters: WalletAdapter[];
+  isModalOpen: boolean;
+  openWalletModal: () => void;
+  closeWalletModal: () => void;
 }
 
 const WalletContext = createContext<WalletContextType | undefined>(undefined);
+
+const PREFERRED_WALLET_KEY = "preferred_wallet";
+const PREFERRED_ACCOUNT_KEY = "preferred_account";
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [activeWallet, setActiveWallet] = useState<WalletType | null>(null);
@@ -36,177 +55,256 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [network, setNetwork] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lastAttemptedWallet, setLastAttemptedWallet] =
+    useState<WalletType | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
 
-  const isWalletDetected = useCallback((type: WalletType) => {
-    if (typeof window === "undefined") return false;
-    switch (type) {
-      case "freighter":
-        return true; // Modern Freighter uses postMessage
-      case "albedo":
-        return true; // Albedo is web-based or window.albedo
-      case "xbull":
-        // @ts-ignore
-        return !!(window.xBullSDK || window.xBull);
-      case "rango":
-        return true; // Rango Web Suite
-      case "soroban-wallet":
-        // @ts-ignore
-        return !!window.soroban;
-      default:
-        return false;
-    }
+  const [detectedWallets, setDetectedWallets] = useState<
+    Record<WalletType, boolean>
+  >({
+    freighter: true,
+    xbull: false,
+    albedo: true,
+    hana: false,
+    walletconnect: true,
+    rango: true,
+    "soroban-wallet": false,
+  });
+
+  const activeUnsubscribersRef = useRef<Array<() => void>>([]);
+
+  const cleanupListeners = useCallback(() => {
+    activeUnsubscribersRef.current.forEach((unsub) => {
+      try {
+        unsub();
+      } catch (err) {
+        console.warn("Error cleaning up wallet listener:", err);
+      }
+    });
+    activeUnsubscribersRef.current = [];
   }, []);
 
-  const connect = useCallback(async (type: WalletType, auto = false) => {
+  const refreshDetection = useCallback(async () => {
     if (typeof window === "undefined") return;
+    const adapters = walletRegistry.getAll();
+    const results: Record<string, boolean> = {};
 
-    if (!isWalletDetected(type)) {
-      setStatus("unavailable");
-      setError(`${type} wallet extension or service is not detected.`);
-      if (!auto) {
-        window.alert(`${type} wallet extension is not installed or detected. Please install or select an available wallet.`);
-      }
-      return;
-    }
-
-    setStatus("connecting");
-    setError(null);
-
-    try {
-      let address = "";
-      let net = "TESTNET";
-      let fetchedAccounts: WalletAccount[] = [];
-
-      if (type === "freighter") {
-        const allowedRes = await freighterApi.isAllowed();
-        let isAllowed = allowedRes.isAllowed === true;
-
-        if (!isAllowed) {
-          if (auto) {
-            setStatus("idle");
-            return;
-          }
-          const accessRes = await freighterApi.requestAccess();
-          if (accessRes.error) throw new Error(accessRes.error);
-          address = accessRes.address;
-        } else {
-          const addressRes = await freighterApi.getAddress();
-          if (addressRes.error) throw new Error(addressRes.error);
-          address = addressRes.address;
+    await Promise.all(
+      adapters.map(async (adapter) => {
+        try {
+          const available = await adapter.isAvailable();
+          results[adapter.id] = available;
+        } catch {
+          results[adapter.id] = false;
         }
+      }),
+    );
 
-        const networkRes = await freighterApi.getNetworkDetails();
-        if (networkRes.error) throw new Error(networkRes.error);
-        net = networkRes.network;
-        fetchedAccounts = [{ address, name: "Freighter Main Account" }];
-      } else if (type === "albedo") {
-        // Albedo Link intent integration
-        // @ts-ignore
-        if (window.albedo && typeof window.albedo.publicKey === "function") {
-          // @ts-ignore
-          const res = await window.albedo.publicKey({});
-          address = res.pubkey;
-        } else {
-          // Fallback / mock intent for web integration
-          const mockAlbedoKey = "G" + Array.from({ length: 55 }, (_, i) => "ABCDEFGHJKLMNPQRSTUVWXYZ234567"[i % 30]).join("");
-          address = mockAlbedoKey;
-        }
-        fetchedAccounts = [{ address, name: "Albedo Primary" }, { address: address.slice(0, 50) + "MULTISIG", isMultisig: true, name: "Albedo Vault (Multisig)" }];
-      } else if (type === "xbull") {
-        // @ts-ignore
-        if (window.xBullSDK) {
-          // @ts-ignore
-          address = await window.xBullSDK.getPublicKey();
-        } else {
-          const mockXbullKey = "GXBULL" + Array.from({ length: 50 }, (_, i) => "0123456789ABCDEF"[i % 16]).join("");
-          address = mockXbullKey;
-        }
-        fetchedAccounts = [{ address, name: "xBull Account 1" }];
-      } else if (type === "rango") {
-        const mockRangoKey = "GRANGO" + Array.from({ length: 50 }, (_, i) => "0123456789ABCDEF"[i % 16]).join("");
-        address = mockRangoKey;
-        fetchedAccounts = [{ address, name: "Rango Web Wallet" }];
-      } else if (type === "soroban-wallet") {
-        // @ts-ignore
-        const res = await window.soroban.getPublicKey();
-        address = res;
-        // @ts-ignore
-        net = await window.soroban.getNetwork();
-        fetchedAccounts = [{ address, name: "Soroban Wallet" }];
-      }
+    setDetectedWallets((prev) => ({ ...prev, ...results }));
+  }, []);
 
-      setActiveWallet(type);
-      setActiveAccount(address);
-      setAllAccounts(fetchedAccounts);
-      setNetwork(net);
-      setStatus("connected");
+  useEffect(() => {
+    refreshDetection();
+    const timer = setTimeout(refreshDetection, 500);
+    return () => clearTimeout(timer);
+  }, [refreshDetection]);
 
-      localStorage.setItem("preferred_wallet", type);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to connect wallet";
-      setStatus("error");
-      setError(msg);
-      if (!auto) {
-        window.alert(`Wallet Connection Error: ${msg}`);
-      }
-    }
-  }, [isWalletDetected]);
+  const isWalletDetected = useCallback(
+    (type: WalletType) => {
+      if (typeof window === "undefined") return false;
+      return !!detectedWallets[type];
+    },
+    [detectedWallets],
+  );
 
   const disconnect = useCallback(() => {
+    cleanupListeners();
+    const adapter = activeWallet ? walletRegistry.get(activeWallet) : null;
+    if (adapter) {
+      try {
+        adapter.disconnect();
+      } catch (err) {
+        console.warn("Adapter disconnect error:", err);
+      }
+    }
+
     setActiveWallet(null);
     setActiveAccount(null);
     setAllAccounts([]);
     setNetwork(null);
     setStatus("idle");
     setError(null);
-    localStorage.removeItem("preferred_wallet");
-  }, []);
+    setLastAttemptedWallet(null);
+
+    if (typeof window !== "undefined") {
+      localStorage.removeItem(PREFERRED_WALLET_KEY);
+      localStorage.removeItem(PREFERRED_ACCOUNT_KEY);
+    }
+  }, [activeWallet, cleanupListeners]);
+
+  const connect = useCallback(
+    async (type: WalletType, auto = false) => {
+      if (typeof window === "undefined") return;
+
+      setLastAttemptedWallet(type);
+      const adapter = walletRegistry.get(type);
+
+      if (!adapter) {
+        setStatus("unavailable");
+        setError(`Wallet adapter for ${type} is not registered.`);
+        return;
+      }
+
+      const available = await adapter.isAvailable();
+      if (!available && !auto) {
+        setStatus("unavailable");
+        setError(`${adapter.name} extension or application is not detected.`);
+        return;
+      }
+
+      setStatus("connecting");
+      setError(null);
+
+      try {
+        const result = await adapter.connect(auto);
+        const address = result.address;
+        const net = result.network ?? "TESTNET";
+        const accounts =
+          result.allAccounts && result.allAccounts.length > 0
+            ? result.allAccounts
+            : [{ address, name: `${adapter.name} Account` }];
+
+        cleanupListeners();
+
+        // Subscribe to account changes
+        if (typeof adapter.onAccountChange === "function") {
+          const unsub = adapter.onAccountChange((newAddress: string) => {
+            if (newAddress && newAddress !== address) {
+              setActiveAccount(newAddress);
+              setAllAccounts((prev) => {
+                const exists = prev.some((acc) => acc.address === newAddress);
+                if (exists) return prev;
+                return [{ address: newAddress, name: "Active Account" }, ...prev];
+              });
+              localStorage.setItem(PREFERRED_ACCOUNT_KEY, newAddress);
+            }
+          });
+          if (typeof unsub === "function") {
+            activeUnsubscribersRef.current.push(unsub);
+          }
+        }
+
+        // Subscribe to network changes
+        if (typeof adapter.onNetworkChange === "function") {
+          const unsub = adapter.onNetworkChange((newNetwork: string) => {
+            if (newNetwork) {
+              setNetwork(newNetwork);
+            }
+          });
+          if (typeof unsub === "function") {
+            activeUnsubscribersRef.current.push(unsub);
+          }
+        }
+
+        setActiveWallet(type);
+        setActiveAccount(address);
+        setAllAccounts(accounts);
+        setNetwork(net);
+        setStatus("connected");
+        setLastAttemptedWallet(null);
+
+        localStorage.setItem(PREFERRED_WALLET_KEY, type);
+        localStorage.setItem(PREFERRED_ACCOUNT_KEY, address);
+      } catch (err) {
+        if (auto) {
+          setStatus("idle");
+          return;
+        }
+        const msg =
+          err instanceof Error ? err.message : "Failed to connect wallet";
+        setStatus("error");
+        setError(msg);
+        console.error("Wallet connection error:", msg);
+      }
+    },
+    [cleanupListeners],
+  );
 
   const switchAccount = useCallback((address: string) => {
     setActiveAccount(address);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(PREFERRED_ACCOUNT_KEY, address);
+    }
   }, []);
 
-  const signTransaction = useCallback(async (xdr: string): Promise<string | null> => {
-    if (!activeWallet || status !== "connected") {
-      setError("No wallet connected");
-      return null;
+  const retry = useCallback(async () => {
+    if (lastAttemptedWallet) {
+      await connect(lastAttemptedWallet);
     }
+  }, [connect, lastAttemptedWallet]);
 
-    try {
-      if (activeWallet === "freighter") {
-        const result = await freighterApi.signTransaction(xdr, {
-          networkPassphrase: network ?? "Test SDF Network ; November 2015",
-        });
-        return typeof result === "string" ? result : result.signedTxXdr || null;
-      } else if (activeWallet === "albedo") {
-        // @ts-ignore
-        if (window.albedo && typeof window.albedo.tx === "function") {
-          // @ts-ignore
-          const res = await window.albedo.tx({ xdr, network: network ?? "TESTNET" });
-          return res.signed_envelope_xdr;
-        }
-        return xdr; // Mock signed return
-      } else if (activeWallet === "xbull") {
-        // @ts-ignore
-        if (window.xBullSDK) {
-          // @ts-ignore
-          return await window.xBullSDK.signXDR(xdr);
-        }
-        return xdr;
+  const signTransaction = useCallback(
+    async (
+      xdr: string,
+      options?: { networkPassphrase?: string; network?: string },
+    ): Promise<string | null> => {
+      if (!activeWallet || status !== "connected") {
+        const errMsg = "No wallet connected";
+        setError(errMsg);
+        console.error(errMsg);
+        return null;
       }
-      return xdr;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Transaction signing failed");
-      return null;
-    }
-  }, [activeWallet, status, network]);
 
+      const adapter = walletRegistry.get(activeWallet);
+      if (!adapter) {
+        const errMsg = `Adapter not found for ${activeWallet}`;
+        setError(errMsg);
+        return null;
+      }
+
+      try {
+        return await adapter.signTransaction(xdr, {
+          networkPassphrase:
+            options?.networkPassphrase ??
+            (network === "PUBLIC"
+              ? "Public Global Stellar Network ; September 2015"
+              : "Test SDF Network ; November 2015"),
+          network: options?.network ?? network ?? "TESTNET",
+          accountToSign: activeAccount ?? undefined,
+        });
+      } catch (err) {
+        const errMsg =
+          err instanceof Error ? err.message : "Transaction signing failed";
+        setError(errMsg);
+        console.error("Transaction signing error:", errMsg);
+        return null;
+      }
+    },
+    [activeWallet, status, network, activeAccount],
+  );
+
+  // Auto-reconnect on startup with network verification
   useEffect(() => {
-    const preferred = localStorage.getItem("preferred_wallet") as WalletType | null;
-    if (preferred && isWalletDetected(preferred)) {
-      connect(preferred, true);
+    if (typeof window === "undefined") return;
+
+    const preferredWallet = localStorage.getItem(
+      PREFERRED_WALLET_KEY,
+    ) as WalletType | null;
+
+    if (preferredWallet) {
+      connect(preferredWallet, true);
     }
-  }, [connect, isWalletDetected]);
+  }, [connect]);
+
+  // Clean up listeners on unmount
+  useEffect(() => {
+    return () => {
+      cleanupListeners();
+    };
+  }, [cleanupListeners]);
+
+  const openWalletModal = useCallback(() => setIsModalOpen(true), []);
+  const closeWalletModal = useCallback(() => setIsModalOpen(false), []);
 
   return (
     <WalletContext.Provider
@@ -223,6 +321,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         switchAccount,
         signTransaction,
         isWalletDetected,
+        retry,
+        lastAttemptedWallet,
+        adapters: walletRegistry.getAll(),
+        isModalOpen,
+        openWalletModal,
+        closeWalletModal,
       }}
     >
       {children}
@@ -230,7 +334,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   );
 }
 
-export function useWallet() {
+export function useWallet(): WalletContextType {
   const context = useContext(WalletContext);
   if (context === undefined) {
     throw new Error("useWallet must be used within a WalletProvider");

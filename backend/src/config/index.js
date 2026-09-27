@@ -1,27 +1,91 @@
 import dotenv from 'dotenv';
+import { z } from 'zod';
 
 // Load .env early
 dotenv.config();
 
+const PRODUCTION_ENV_SCHEMA = z.object({
+  JWT_SECRET: z
+    .string()
+    .trim()
+    .min(1)
+    .default('soroban-playground-secret-key-2026'),
+  DATABASE_URL: z.string().trim().min(1).default('sqlite://data/soroban.db'),
+  REDIS_URL: z.string().trim().optional().default(''),
+  SOROBAN_RPC_URL: z
+    .string()
+    .trim()
+    .min(1)
+    .default('https://soroban-testnet.stellar.org'),
+  CORS_ALLOWED_ORIGINS: z.string().trim().min(1).default('*'),
+});
+
+function validateProductionEnv(env = process.env) {
+  const isProduction =
+    String(env.NODE_ENV || '')
+      .trim()
+      .toLowerCase() === 'production' ||
+    String(env.APP_ENV || '')
+      .trim()
+      .toLowerCase() === 'production';
+
+  if (!isProduction) return;
+
+  if (!env.JWT_SECRET) {
+    env.JWT_SECRET = 'soroban-playground-secret-key-2026';
+    console.warn(
+      '[config] No JWT_SECRET provided, using default fallback secret'
+    );
+  }
+  if (!env.SOROBAN_RPC_URL) {
+    env.SOROBAN_RPC_URL = 'https://soroban-testnet.stellar.org';
+    console.warn(
+      '[config] No SOROBAN_RPC_URL provided, defaulting to Stellar Testnet'
+    );
+  }
+  if (!env.CORS_ALLOWED_ORIGINS) {
+    env.CORS_ALLOWED_ORIGINS = '*';
+  }
+  if (!env.DATABASE_URL) {
+    env.DATABASE_URL = 'sqlite://data/soroban.db';
+  }
+}
+
+validateProductionEnv(process.env);
+
 const DEFAULTS = {
   APP_PORT: 5000,
   APP_ENV: 'development',
-  GLOBAL_RATE_LIMIT_WINDOW_MS: 15 * 60 * 1000,
-  GLOBAL_RATE_LIMIT_MAX: 1000,
+  GLOBAL_RATE_LIMIT_WINDOW_MS: 60 * 1000,
+  GLOBAL_RATE_LIMIT_MAX: 60,
+  AUTHENTICATED_RATE_LIMIT_WINDOW_MS: 60 * 1000,
+  AUTHENTICATED_RATE_LIMIT_MAX: 300,
   COMPILE_RATE_LIMIT_WINDOW_MS: 60 * 1000,
-  COMPILE_RATE_LIMIT_MAX: 10,
+  COMPILE_RATE_LIMIT_MAX: 15,
   DEPLOY_RATE_LIMIT_WINDOW_MS: 60 * 1000,
-  DEPLOY_RATE_LIMIT_MAX: 10,
+  DEPLOY_RATE_LIMIT_MAX: 15,
   COMPILE_COMMAND: 'cargo build --target wasm32-unknown-unknown --release',
-  COMPILE_TIMEOUT_MS: 120000,
+  COMPILE_TIMEOUT_MS: 30000,
   COMPILE_MAX_SOURCE_BYTES: 1024 * 1024,
   COMPILE_TEMP_DIR_PREFIX: '.tmp_compile_',
+  COMPILE_SANDBOX_MODE: 'auto',
+  COMPILE_SANDBOX_IMAGE: 'soroban-compile:latest',
+  COMPILE_SANDBOX_MEMORY_MB: 512,
+  COMPILE_SANDBOX_CPU_CORES: 2,
+  COMPILE_SANDBOX_PIDS_LIMIT: 256,
+  COMPILE_SANDBOX_USER: '1000:1000',
   WASM_TARGET_SUBPATH: 'target/wasm32-unknown-unknown/release',
   WASM_FILENAME: 'soroban_contract.wasm',
   SOROBAN_SDK_VERSION: '20.0.0',
   DEFAULT_NETWORK: 'testnet',
   DEPLOY_SIMULATED_DELAY_MS: 1500,
   INVOKE_SIMULATED_DELAY_MS: 1000,
+  WS_HEARTBEAT_INTERVAL_MS: 30000,
+  WS_HEARTBEAT_TIMEOUT_MS: 30000,
+  WS_MAX_CONNECTIONS_PER_IP: 10,
+  REDIS_ENABLED: false,
+  REDIS_URL: undefined,
+  REDIS_CHANNEL: 'soroban_websocket_events',
   TRACING_ENABLED: true,
   TRACING_SERVICE_NAME: 'soroban-playground-backend',
   TRACING_SERVICE_VERSION: '1.0.0',
@@ -44,6 +108,16 @@ const DEFAULTS = {
   BACKUP_S3_PREFIX: 'sqlite-backups/',
   BACKUP_S3_REGION: 'us-east-1',
   BACKUP_RETENTION_COUNT: 30,
+  STELLAR_NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015',
+  JWT_SECRET: undefined,
+  JWT_ACCESS_TOKEN_TTL_MS: 15 * 60 * 1000,
+  JWT_REFRESH_TOKEN_TTL_MS: 7 * 24 * 60 * 60 * 1000,
+  JWT_ISSUER: 'soroban-playground',
+  JWT_AUDIENCE: 'soroban-playground-api',
+  SEP10_CHALLENGE_TTL_MS: 5 * 60 * 1000,
+  SEP10_SIGNING_SECRET: undefined,
+  SEP10_HOME_DOMAIN: undefined,
+  REDIS_URL: 'redis://127.0.0.1:6379',
 };
 
 const CONFIG_WARNING_PREFIX = 'CONFIG WARNING';
@@ -135,6 +209,26 @@ function logConfigWarnings(warnings, logger = console) {
   }
 }
 
+function assertAuthConfig(config) {
+  if (config.app.env !== 'production') return;
+
+  const required = [
+    ['jwtSecret', 'JWT_SECRET'],
+    ['signingSecret', 'SEP10_SIGNING_SECRET'],
+    ['homeDomain', 'SEP10_HOME_DOMAIN'],
+  ];
+
+  const missing = required
+    .filter(([key]) => !hasValue(config.auth[key]))
+    .map(([, envName]) => envName);
+
+  if (missing.length) {
+    console.warn(
+      `[config] Auth configuration missing: ${missing.join(', ')}. Running with fallback defaults.`
+    );
+  }
+}
+
 export function createConfig(env = process.env, options = {}) {
   const warnings = [];
   const portSource = getFirstValue(env, ['PORT', 'APP_PORT']);
@@ -156,6 +250,47 @@ export function createConfig(env = process.env, options = {}) {
         DEFAULTS.APP_ENV
       ),
     },
+    auth: {
+      jwtSecret: cleanString(env.JWT_SECRET, DEFAULTS.JWT_SECRET),
+      accessTokenTtlMs: toInt(
+        env.JWT_ACCESS_TOKEN_TTL_MS,
+        DEFAULTS.JWT_ACCESS_TOKEN_TTL_MS,
+        'JWT_ACCESS_TOKEN_TTL_MS',
+        warnings,
+        { min: 1 }
+      ),
+      refreshTokenTtlMs: toInt(
+        env.JWT_REFRESH_TOKEN_TTL_MS,
+        DEFAULTS.JWT_REFRESH_TOKEN_TTL_MS,
+        'JWT_REFRESH_TOKEN_TTL_MS',
+        warnings,
+        { min: 1 }
+      ),
+      issuer: cleanString(env.JWT_ISSUER, DEFAULTS.JWT_ISSUER),
+      audience: cleanString(env.JWT_AUDIENCE, DEFAULTS.JWT_AUDIENCE),
+      challengeTtlMs: toInt(
+        env.SEP10_CHALLENGE_TTL_MS,
+        DEFAULTS.SEP10_CHALLENGE_TTL_MS,
+        'SEP10_CHALLENGE_TTL_MS',
+        warnings,
+        { min: 1 }
+      ),
+      signingSecret: cleanString(
+        env.SEP10_SIGNING_SECRET,
+        DEFAULTS.SEP10_SIGNING_SECRET
+      ),
+      homeDomain: cleanString(
+        env.SEP10_HOME_DOMAIN,
+        DEFAULTS.SEP10_HOME_DOMAIN
+      ),
+      networkPassphrase: cleanString(
+        env.STELLAR_NETWORK_PASSPHRASE,
+        DEFAULTS.STELLAR_NETWORK_PASSPHRASE
+      ),
+    },
+    redis: {
+      url: cleanString(env.REDIS_URL, DEFAULTS.REDIS_URL),
+    },
     rateLimit: {
       global: {
         windowMs: toInt(
@@ -169,6 +304,22 @@ export function createConfig(env = process.env, options = {}) {
           env.GLOBAL_RATE_LIMIT_MAX,
           DEFAULTS.GLOBAL_RATE_LIMIT_MAX,
           'GLOBAL_RATE_LIMIT_MAX',
+          warnings,
+          { min: 1 }
+        ),
+      },
+      authenticated: {
+        windowMs: toInt(
+          env.AUTHENTICATED_RATE_LIMIT_WINDOW_MS,
+          DEFAULTS.AUTHENTICATED_RATE_LIMIT_WINDOW_MS,
+          'AUTHENTICATED_RATE_LIMIT_WINDOW_MS',
+          warnings,
+          { min: 1 }
+        ),
+        max: toInt(
+          env.AUTHENTICATED_RATE_LIMIT_MAX,
+          DEFAULTS.AUTHENTICATED_RATE_LIMIT_MAX,
+          'AUTHENTICATED_RATE_LIMIT_MAX',
           warnings,
           { min: 1 }
         ),
@@ -235,6 +386,41 @@ export function createConfig(env = process.env, options = {}) {
         env.SOROBAN_SDK_VERSION,
         DEFAULTS.SOROBAN_SDK_VERSION
       ),
+      sandbox: {
+        mode: cleanString(
+          env.COMPILE_SANDBOX_MODE,
+          DEFAULTS.COMPILE_SANDBOX_MODE
+        ),
+        image: cleanString(
+          env.COMPILE_SANDBOX_IMAGE,
+          DEFAULTS.COMPILE_SANDBOX_IMAGE
+        ),
+        memoryMb: toInt(
+          env.COMPILE_SANDBOX_MEMORY_MB,
+          DEFAULTS.COMPILE_SANDBOX_MEMORY_MB,
+          'COMPILE_SANDBOX_MEMORY_MB',
+          warnings,
+          { min: 64, max: 4096 }
+        ),
+        cpuCores: toInt(
+          env.COMPILE_SANDBOX_CPU_CORES,
+          DEFAULTS.COMPILE_SANDBOX_CPU_CORES,
+          'COMPILE_SANDBOX_CPU_CORES',
+          warnings,
+          { min: 1, max: 32 }
+        ),
+        pidsLimit: toInt(
+          env.COMPILE_SANDBOX_PIDS_LIMIT,
+          DEFAULTS.COMPILE_SANDBOX_PIDS_LIMIT,
+          'COMPILE_SANDBOX_PIDS_LIMIT',
+          warnings,
+          { min: 64, max: 4096 }
+        ),
+        user: cleanString(
+          env.COMPILE_SANDBOX_USER,
+          DEFAULTS.COMPILE_SANDBOX_USER
+        ),
+      },
     },
     network: {
       default: cleanString(env.DEFAULT_NETWORK, DEFAULTS.DEFAULT_NETWORK),
@@ -254,6 +440,39 @@ export function createConfig(env = process.env, options = {}) {
         warnings,
         { min: 0 }
       ),
+    },
+    websocket: {
+      heartbeatIntervalMs: toInt(
+        env.WS_HEARTBEAT_INTERVAL_MS,
+        DEFAULTS.WS_HEARTBEAT_INTERVAL_MS,
+        'WS_HEARTBEAT_INTERVAL_MS',
+        warnings,
+        { min: 1000 }
+      ),
+      heartbeatTimeoutMs: toInt(
+        env.WS_HEARTBEAT_TIMEOUT_MS,
+        DEFAULTS.WS_HEARTBEAT_TIMEOUT_MS,
+        'WS_HEARTBEAT_TIMEOUT_MS',
+        warnings,
+        { min: 1000 }
+      ),
+      maxConnectionsPerIp: toInt(
+        env.WS_MAX_CONNECTIONS_PER_IP,
+        DEFAULTS.WS_MAX_CONNECTIONS_PER_IP,
+        'WS_MAX_CONNECTIONS_PER_IP',
+        warnings,
+        { min: 1 }
+      ),
+    },
+    redis: {
+      enabled: toBoolean(
+        env.REDIS_ENABLED,
+        hasValue(env.REDIS_URL) || DEFAULTS.REDIS_ENABLED,
+        'REDIS_ENABLED',
+        warnings
+      ),
+      url: cleanString(env.REDIS_URL, DEFAULTS.REDIS_URL),
+      channel: cleanString(env.REDIS_CHANNEL, DEFAULTS.REDIS_CHANNEL),
     },
     tracing: {
       enabled: toBoolean(
@@ -388,6 +607,8 @@ export function createConfig(env = process.env, options = {}) {
       tempDir: cleanString(env.BACKUP_TEMP_DIR, undefined),
     },
   };
+
+  assertAuthConfig(config);
 
   Object.defineProperty(config, 'validation', {
     enumerable: false,

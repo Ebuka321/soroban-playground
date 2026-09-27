@@ -1,6 +1,12 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useFreighterWallet } from "@/hooks/useFreighterWallet";
@@ -49,18 +55,84 @@ type NavGroup = {
   items: NavItem[];
 };
 
-export default function ResponsiveNav({ children }: { children: React.ReactNode }) {
+const NAVIGATION: NavGroup[] = [
+  {
+    groupName: "Core IDE & Ops",
+    items: [
+      { name: "IDE Playground", href: "/playground", icon: Code2 },
+      { name: "Compile Dashboard", href: "/compile-dashboard", icon: Zap },
+      { name: "Docs & Reference", href: "/docs", icon: BookOpen },
+      { name: "Audit Explorer", href: "/audit", icon: Shield },
+      { name: "Search Utility", href: "/search", icon: Search },
+      { name: "Ledger Migration", href: "/migration", icon: Send },
+      { name: "Rate Limits", href: "/rate-limits", icon: Sliders },
+    ],
+  },
+  {
+    groupName: "DeFi Suite",
+    items: [
+      { name: "Synthetic Assets", href: "/", icon: Coins },
+      { name: "Limit Order Book", href: "/orderbook", icon: Boxes },
+      { name: "Stablecoin Peg", href: "/stablecoin", icon: Waves },
+      { name: "Yield Optimizer", href: "/yield-optimizer", icon: TrendingUp },
+      { name: "NFT AMM Pool", href: "/nft-amm", icon: Activity },
+    ],
+  },
+  {
+    groupName: "Governance & Trust",
+    items: [
+      { name: "Governance Portal", href: "/governance/history", icon: Users },
+      {
+        name: "Quadratic Voting",
+        href: "/quadratic-voting",
+        icon: Fingerprint,
+      },
+      { name: "Treasury Panel", href: "/treasury", icon: Wallet },
+      { name: "Bug Bounty Program", href: "/bug-bounty", icon: AlertTriangle },
+    ],
+  },
+  {
+    groupName: "Real World Assets",
+    items: [
+      { name: "Tokenized REIT", href: "/reit", icon: Building2 },
+      { name: "Patent Registry", href: "/patents", icon: FileText },
+      { name: "Music Licensing", href: "/music-licensing", icon: Music },
+      { name: "Data Marketplace", href: "/data-marketplace", icon: Database },
+      { name: "Content Publishing", href: "/content-publishing", icon: Globe },
+    ],
+  },
+  {
+    groupName: "Gaming & Sports",
+    items: [
+      { name: "Sports Dashboard", href: "/sports", icon: Trophy },
+      { name: "Sports Prediction", href: "/sports-prediction", icon: Target },
+    ],
+  },
+];
+
+const formatAddress = (addr: string | null) => {
+  if (!addr) return "";
+  return `${addr.slice(0, 5)}...${addr.slice(-4)}`;
+};
+
+export default function ResponsiveNav({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   const pathname = usePathname();
   const wallet = useFreighterWallet();
   const [isOpen, setIsOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
-    "Core IDE & Ops": true,
-    "DeFi Suite": true,
-    "Governance & Trust": true,
-    "Real World Assets": false,
-    "Gaming & Sports": false,
-  });
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(
+    {
+      "Core IDE & Ops": true,
+      "DeFi Suite": true,
+      "Governance & Trust": true,
+      "Real World Assets": false,
+      "Gaming & Sports": false,
+    },
+  );
   const drawerRef = useRef<HTMLDivElement>(null);
   const hamburgerRef = useRef<HTMLButtonElement>(null);
   const [reducedMotion, setReducedMotion] = useState(() => {
@@ -77,63 +149,12 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  const navigation: NavGroup[] = [
-    {
-      groupName: "Core IDE & Ops",
-      items: [
-        { name: "IDE Playground", href: "/playground", icon: Code2 },
-        { name: "Compile Dashboard", href: "/compile-dashboard", icon: Zap },
-        { name: "Docs & Reference", href: "/docs", icon: BookOpen },
-        { name: "Audit Explorer", href: "/audit", icon: Shield },
-        { name: "Search Utility", href: "/search", icon: Search },
-        { name: "Ledger Migration", href: "/migration", icon: Send },
-        { name: "Rate Limits", href: "/rate-limits", icon: Sliders },
-      ],
-    },
-    {
-      groupName: "DeFi Suite",
-      items: [
-        { name: "Synthetic Assets", href: "/", icon: Coins },
-        { name: "Limit Order Book", href: "/orderbook", icon: Boxes },
-        { name: "Stablecoin Peg", href: "/stablecoin", icon: Waves },
-        { name: "Yield Optimizer", href: "/yield-optimizer", icon: TrendingUp },
-        { name: "NFT AMM Pool", href: "/nft-amm", icon: Activity },
-      ],
-    },
-    {
-      groupName: "Governance & Trust",
-      items: [
-        { name: "Governance Portal", href: "/governance/history", icon: Users },
-        { name: "Quadratic Voting", href: "/quadratic-voting", icon: Fingerprint },
-        { name: "Treasury Panel", href: "/treasury", icon: Wallet },
-        { name: "Bug Bounty Program", href: "/bug-bounty", icon: AlertTriangle },
-      ],
-    },
-    {
-      groupName: "Real World Assets",
-      items: [
-        { name: "Tokenized REIT", href: "/reit", icon: Building2 },
-        { name: "Patent Registry", href: "/patents", icon: FileText },
-        { name: "Music Licensing", href: "/music-licensing", icon: Music },
-        { name: "Data Marketplace", href: "/data-marketplace", icon: Database },
-        { name: "Content Publishing", href: "/content-publishing", icon: Globe },
-      ],
-    },
-    {
-      groupName: "Gaming & Sports",
-      items: [
-        { name: "Sports Dashboard", href: "/sports", icon: Trophy },
-        { name: "Sports Prediction", href: "/sports-prediction", icon: Target },
-      ],
-    },
-  ];
-
-  const toggleGroup = (groupName: string) => {
+  const toggleGroup = useCallback((groupName: string) => {
     setExpandedGroups((prev) => ({ ...prev, [groupName]: !prev[groupName] }));
-  };
+  }, []);
 
-  const getActiveItemName = () => {
-    for (const group of navigation) {
+  const activeItemName = useMemo(() => {
+    for (const group of NAVIGATION) {
       const active = group.items.find((item) => item.href === pathname);
       if (active) return active.name;
     }
@@ -141,19 +162,17 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
     if (pathname.startsWith("/music-licensing")) return "Music Licensing";
     if (pathname.startsWith("/governance")) return "Governance Portal";
     return "Stellar Playground";
-  };
+  }, [pathname]);
 
-  const formatAddress = (addr: string | null) => {
-    if (!addr) return "";
-    return `${addr.slice(0, 5)}...${addr.slice(-4)}`;
-  };
-
-  const isActive = (href: string) => {
-    if (href === "/") {
-      return pathname === "/";
-    }
-    return pathname.startsWith(href);
-  };
+  const isActive = useCallback(
+    (href: string) => {
+      if (href === "/") {
+        return pathname === "/";
+      }
+      return pathname.startsWith(href);
+    },
+    [pathname],
+  );
 
   const closeDrawer = useCallback(() => {
     setIsOpen(false);
@@ -253,7 +272,7 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
 
         {/* Navigation list */}
         <div className="flex-1 overflow-y-auto py-4 px-3 space-y-5 scrollbar-thin scrollbar-thumb-slate-800">
-          {navigation.map((group) => (
+          {NAVIGATION.map((group) => (
             <div key={group.groupName} className="space-y-1">
               {!collapsed && (
                 <button
@@ -288,11 +307,15 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
                       >
                         <item.icon
                           className={`shrink-0 transition-transform group-hover:scale-105 ${
-                            active ? "text-teal-400" : "text-slate-400 group-hover:text-slate-200"
+                            active
+                              ? "text-teal-400"
+                              : "text-slate-400 group-hover:text-slate-200"
                           }`}
                           size={16}
                         />
-                        {!collapsed && <span className="truncate">{item.name}</span>}
+                        {!collapsed && (
+                          <span className="truncate">{item.name}</span>
+                        )}
                         {!collapsed && item.badge && (
                           <span className="ml-auto px-1.5 py-0.5 text-[9px] rounded bg-teal-500/20 border border-teal-500/30 text-teal-300 font-semibold font-mono">
                             {item.badge}
@@ -317,7 +340,9 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
                 </span>
                 <span
                   className={`h-1.5 w-1.5 rounded-full ${
-                    wallet.status === "connected" ? "bg-emerald-400 animate-pulse" : "bg-slate-600"
+                    wallet.status === "connected"
+                      ? "bg-emerald-400 animate-pulse"
+                      : "bg-slate-600"
                   }`}
                 />
               </div>
@@ -328,7 +353,10 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
                     {formatAddress(wallet.address)}
                   </p>
                   <p className="text-[10px] text-slate-500 font-medium">
-                    Network: <span className="text-slate-300 uppercase">{wallet.network}</span>
+                    Network:{" "}
+                    <span className="text-slate-300 uppercase">
+                      {wallet.network}
+                    </span>
                   </p>
                 </div>
               ) : (
@@ -378,7 +406,10 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
             onClick={closeDrawer}
             className="flex items-center gap-2 min-h-[44px]"
           >
-            <Orbit size={18} className="text-teal-400 animate-spin-[duration:12s]" />
+            <Orbit
+              size={18}
+              className="text-teal-400 animate-spin-[duration:12s]"
+            />
             <span className="font-semibold text-sm tracking-wider uppercase text-white">
               Soroban Playground
             </span>
@@ -393,7 +424,7 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
         </div>
 
         <div className="flex-1 overflow-y-auto py-4 px-3 space-y-4">
-          {navigation.map((group) => (
+          {NAVIGATION.map((group) => (
             <div key={group.groupName} className="space-y-1">
               <p className="px-3 py-1 text-[9px] font-semibold text-slate-500 uppercase tracking-widest">
                 {group.groupName}
@@ -412,7 +443,10 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
                           : "text-slate-400 hover:text-slate-200 hover:bg-white/[0.02]"
                       }`}
                     >
-                      <item.icon size={16} className={active ? "text-teal-400" : "text-slate-400"} />
+                      <item.icon
+                        size={16}
+                        className={active ? "text-teal-400" : "text-slate-400"}
+                      />
                       <span>{item.name}</span>
                     </Link>
                   );
@@ -430,7 +464,9 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
               </span>
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
-                  wallet.status === "connected" ? "bg-emerald-400 animate-pulse" : "bg-slate-600"
+                  wallet.status === "connected"
+                    ? "bg-emerald-400 animate-pulse"
+                    : "bg-slate-600"
                 }`}
               />
             </div>
@@ -475,9 +511,11 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
               <span className="hidden sm:inline-flex text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-400 transition-colors">
                 Soroban Play
               </span>
-              <span className="hidden sm:inline text-slate-600 font-light">/</span>
+              <span className="hidden sm:inline text-slate-600 font-light">
+                /
+              </span>
               <h1 className="text-xs sm:text-sm font-semibold tracking-wider text-white uppercase bg-slate-800/60 border border-slate-700/40 px-2.5 py-1 rounded-lg">
-                {getActiveItemName()}
+                {activeItemName}
               </h1>
             </div>
           </div>
@@ -493,7 +531,9 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
                 className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 text-xs font-medium transition-all hover:bg-slate-800 hover:border-slate-700 shadow-sm"
               >
                 <div className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="font-mono text-xs">{formatAddress(wallet.address)}</span>
+                <span className="font-mono text-xs">
+                  {formatAddress(wallet.address)}
+                </span>
               </button>
             ) : (
               <button
@@ -501,8 +541,15 @@ export default function ResponsiveNav({ children }: { children: React.ReactNode 
                 disabled={wallet.status === "connecting"}
                 className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-teal-400 to-teal-500 hover:from-teal-300 hover:to-teal-400 text-slate-950 font-semibold text-xs transition-all shadow-[0_0_15px_rgba(45,212,191,0.2)] hover:shadow-[0_0_20px_rgba(45,212,191,0.3)] disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <Zap size={13} className={wallet.status === "connecting" ? "animate-pulse" : ""} />
-                {wallet.status === "connecting" ? "Connecting..." : "Link Wallet"}
+                <Zap
+                  size={13}
+                  className={
+                    wallet.status === "connecting" ? "animate-pulse" : ""
+                  }
+                />
+                {wallet.status === "connecting"
+                  ? "Connecting..."
+                  : "Link Wallet"}
               </button>
             )}
           </div>

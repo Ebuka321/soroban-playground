@@ -20,11 +20,7 @@ fn setup() -> (Env, Address, GovernanceClient<'static>) {
     (env, admin, client)
 }
 
-fn mint_and_propose(
-    env: &Env,
-    admin: &Address,
-    client: &GovernanceClient,
-) -> (Address, u32) {
+fn mint_and_propose(env: &Env, admin: &Address, client: &GovernanceClient) -> (Address, u32) {
     let proposer = Address::generate(env);
     client.mint(admin, &proposer, &1_000_000);
     let id = client.propose(
@@ -134,9 +130,24 @@ fn test_propose_increments_count() {
     let (env, admin, client) = setup();
     let proposer = Address::generate(&env);
     client.mint(&admin, &proposer, &1_000_000);
-    client.propose(&proposer, &String::from_str(&env, "P1"), &String::from_str(&env, "d"), &0);
-    client.propose(&proposer, &String::from_str(&env, "P2"), &String::from_str(&env, "d"), &0);
-    client.propose(&proposer, &String::from_str(&env, "P3"), &String::from_str(&env, "d"), &0);
+    client.propose(
+        &proposer,
+        &String::from_str(&env, "P1"),
+        &String::from_str(&env, "d"),
+        &0,
+    );
+    client.propose(
+        &proposer,
+        &String::from_str(&env, "P2"),
+        &String::from_str(&env, "d"),
+        &0,
+    );
+    client.propose(
+        &proposer,
+        &String::from_str(&env, "P3"),
+        &String::from_str(&env, "d"),
+        &0,
+    );
     assert_eq!(client.get_proposal_count(), 3);
 }
 
@@ -341,7 +352,7 @@ fn test_revoke_delegation() {
     client.mint(&admin, &voter, &100);
     client.delegate(&voter, &Some(other.clone()));
     client.delegate(&voter, &None); // revoke
-    // After revoke, effective delegate is self
+                                    // After revoke, effective delegate is self
     assert_eq!(client.get_delegate(&voter), voter);
 }
 
@@ -549,7 +560,141 @@ fn test_cancel_passed_proposal_fails() {
     );
 }
 
-// ── Full lifecycle ────────────────────────────────────────────────────────────
+// ── Upgrade — 2-step timelock ──────────────────────────────────────────────────
+
+/// Build a dummy 32-byte WASM hash for testing (all zeros or arbitrary bytes).
+fn dummy_wasm_hash(env: &Env) -> soroban_sdk::BytesN<32> {
+    soroban_sdk::BytesN::from_array(env, &[0u8; 32])
+}
+
+fn dummy_wasm_hash_b(env: &Env) -> soroban_sdk::BytesN<32> {
+    soroban_sdk::BytesN::from_array(env, &[1u8; 32])
+}
+
+const MIN_DELAY: u64 = 172_800; // 48 hours in seconds
+
+#[test]
+fn test_schedule_upgrade_ok() {
+    let (env, admin, client) = setup();
+    let hash = dummy_wasm_hash(&env);
+    let execute_after = client.schedule_upgrade(&admin, &hash, &MIN_DELAY);
+    // execute_after should be now + delay
+    let now = env.ledger().timestamp();
+    // The schedule call was made at time `now`; execute_after = now + MIN_DELAY
+    // (we can only bound-check since timestamp may tick)
+    assert!(execute_after >= MIN_DELAY);
+    // Pending upgrade should be visible
+    let pending = client.get_pending_upgrade().unwrap();
+    assert_eq!(pending.wasm_hash, hash);
+    assert_eq!(pending.execute_after, execute_after);
+}
+
+#[test]
+fn test_schedule_upgrade_delay_too_short_fails() {
+    let (env, admin, client) = setup();
+    let hash = dummy_wasm_hash(&env);
+    // 47 hours and 59 minutes — one second short
+    let too_short = MIN_DELAY - 1;
+    let result = client.try_schedule_upgrade(&admin, &hash, &too_short);
+    assert_eq!(result, Err(Ok(Error::UpgradeDelayTooShort)));
+}
+
+#[test]
+fn test_schedule_upgrade_unauthorized_fails() {
+    let (env, _admin, client) = setup();
+    let non_admin = Address::generate(&env);
+    let hash = dummy_wasm_hash(&env);
+    let result = client.try_schedule_upgrade(&non_admin, &hash, &MIN_DELAY);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_execute_upgrade_before_timelock_fails() {
+    let (env, admin, client) = setup();
+    let hash = dummy_wasm_hash(&env);
+    client.schedule_upgrade(&admin, &hash, &MIN_DELAY);
+    // Advance only 47 hours — timelock not yet elapsed
+    env.ledger().with_mut(|l| l.timestamp += MIN_DELAY - 1);
+    let result = client.try_execute_upgrade(&admin, &hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeTimelockActive)));
+}
+
+#[test]
+fn test_execute_upgrade_hash_mismatch_fails() {
+    let (env, admin, client) = setup();
+    let hash_a = dummy_wasm_hash(&env);
+    let hash_b = dummy_wasm_hash_b(&env);
+    client.schedule_upgrade(&admin, &hash_a, &MIN_DELAY);
+    env.ledger().with_mut(|l| l.timestamp += MIN_DELAY);
+    // Pass a different hash
+    let result = client.try_execute_upgrade(&admin, &hash_b);
+    assert_eq!(result, Err(Ok(Error::UpgradeHashMismatch)));
+}
+
+#[test]
+fn test_execute_upgrade_no_pending_fails() {
+    let (env, admin, client) = setup();
+    let hash = dummy_wasm_hash(&env);
+    // No schedule_upgrade call — there is no pending upgrade
+    let result = client.try_execute_upgrade(&admin, &hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotScheduled)));
+}
+
+#[test]
+fn test_execute_upgrade_unauthorized_fails() {
+    let (env, admin, client) = setup();
+    let non_admin = Address::generate(&env);
+    let hash = dummy_wasm_hash(&env);
+    client.schedule_upgrade(&admin, &hash, &MIN_DELAY);
+    env.ledger().with_mut(|l| l.timestamp += MIN_DELAY);
+    let result = client.try_execute_upgrade(&non_admin, &hash);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_cancel_upgrade_ok() {
+    let (env, admin, client) = setup();
+    let hash = dummy_wasm_hash(&env);
+    client.schedule_upgrade(&admin, &hash, &MIN_DELAY);
+    client.cancel_upgrade(&admin);
+    // After cancel, pending upgrade should be None
+    assert_eq!(client.get_pending_upgrade(), None);
+}
+
+#[test]
+fn test_cancel_upgrade_no_pending_fails() {
+    let (_env, admin, client) = setup();
+    let result = client.try_cancel_upgrade(&admin);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotScheduled)));
+}
+
+#[test]
+fn test_cancel_upgrade_unauthorized_fails() {
+    let (env, admin, client) = setup();
+    let non_admin = Address::generate(&env);
+    let hash = dummy_wasm_hash(&env);
+    client.schedule_upgrade(&admin, &hash, &MIN_DELAY);
+    let result = client.try_cancel_upgrade(&non_admin);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_reschedule_upgrade_overwrites_previous() {
+    let (env, admin, client) = setup();
+    let hash_a = dummy_wasm_hash(&env);
+    let hash_b = dummy_wasm_hash_b(&env);
+    client.schedule_upgrade(&admin, &hash_a, &MIN_DELAY);
+    // Reschedule with a different hash
+    client.schedule_upgrade(&admin, &hash_b, &MIN_DELAY);
+    let pending = client.get_pending_upgrade().unwrap();
+    assert_eq!(pending.wasm_hash, hash_b);
+}
+
+#[test]
+fn test_get_pending_upgrade_none_when_not_scheduled() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(client.get_pending_upgrade(), None);
+}
 
 #[test]
 fn test_full_proposal_lifecycle() {
@@ -582,4 +727,80 @@ fn test_full_proposal_lifecycle() {
     env.ledger().with_mut(|l| l.timestamp += 51);
     client.execute(&proposer, &id);
     assert_eq!(client.get_proposal(&id).status, ProposalStatus::Executed);
+}
+
+// ── Delegation — resolution edge cases ─────────────────────────────────────────
+//
+// test_delegation_transfers_vote above only has the *delegate* call vote()
+// with their own balance — it never actually exercises resolve_delegate's
+// redirect (a *delegator* calling vote() themselves), its multi-hop chain
+// walk, or its cycle handling, despite the module doc explicitly advertising
+// "Recursive delegation (up to depth 8)" as a supported feature.
+
+#[test]
+fn test_vote_via_delegator_uses_delegates_balance() {
+    let (env, admin, client) = setup();
+    let delegator = Address::generate(&env);
+    let delegate = Address::generate(&env);
+    client.mint(&admin, &delegator, &1_000_000);
+    client.mint(&admin, &delegate, &300_000);
+    client.delegate(&delegator, &Some(delegate.clone()));
+
+    let id = client.propose(
+        &delegator,
+        &String::from_str(&env, "title"),
+        &String::from_str(&env, "desc"),
+        &0,
+    );
+
+    // The delegator calls vote() directly (not the delegate). resolve_delegate
+    // redirects to `delegate`, so the vote is cast with the delegate's own
+    // balance (300_000), not the delegator's (1_000_000) — delegation moves
+    // *who* can cast the vote, it doesn't pool balances together.
+    client.vote(&delegator, &id, &VoteChoice::For);
+    let p = client.get_proposal(&id);
+    assert_eq!(p.votes_for, 300_000);
+
+    // The vote is recorded against the resolved delegate, so the delegate
+    // themselves is now blocked from voting again on this proposal too.
+    let result = client.try_vote(&delegate, &id, &VoteChoice::Against);
+    assert_eq!(result, Err(Ok(Error::AlreadyVoted)));
+}
+
+#[test]
+fn test_delegation_chain_resolves_through_multiple_hops() {
+    let (env, admin, client) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    client.mint(&admin, &a, &100);
+    client.mint(&admin, &c, &900);
+
+    // a -> b -> c: resolving from `a` must walk both hops to reach `c`.
+    client.delegate(&a, &Some(b.clone()));
+    client.delegate(&b, &Some(c.clone()));
+
+    assert_eq!(client.get_delegate(&a), c);
+    assert_eq!(client.get_voting_power(&a), 100); // own balance, unaffected by delegating out
+}
+
+#[test]
+fn test_delegation_cycle_resolves_without_panicking() {
+    // Mutual delegation (a -> b -> a) must not infinite-loop or panic;
+    // resolve_delegate is bounded to 8 iterations specifically so a cycle
+    // like this terminates deterministically instead of hanging.
+    let (env, admin, client) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.mint(&admin, &a, &100);
+    client.mint(&admin, &b, &200);
+
+    client.delegate(&a, &Some(b.clone()));
+    client.delegate(&b, &Some(a.clone()));
+
+    // Must resolve to *some* address in the cycle without panicking, and
+    // resolving repeatedly must be stable (same input state, same output).
+    let resolved_first = client.get_delegate(&a);
+    assert!(resolved_first == a || resolved_first == b);
+    assert_eq!(client.get_delegate(&a), resolved_first);
 }

@@ -36,6 +36,7 @@ export function buildHelmetMiddleware() {
         objectSrc: ["'none'"],
         scriptSrc: [
           "'self'",
+          "'wasm-unsafe-eval'",
           ...CSP_EXTRA_SCRIPT_SRC,
           (req, res) => `'nonce-${res.locals.cspNonce}'`,
         ],
@@ -52,7 +53,7 @@ export function buildHelmetMiddleware() {
       },
     },
     crossOriginEmbedderPolicy: false,
-    crossOriginResourcePolicy: { policy: 'same-site' },
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
     frameguard: { action: 'deny' },
     hsts: {
@@ -64,6 +65,14 @@ export function buildHelmetMiddleware() {
     noSniff: true,
     dnsPrefetchControl: { allow: false },
     permittedCrossDomainPolicies: { permittedPolicies: 'none' },
+    crossOriginOpenerPolicy: { policy: 'same-origin' },
+    permissionsPolicy: {
+      directives: {
+        camera: [],
+        microphone: [],
+        geolocation: [],
+      },
+    },
   });
 }
 
@@ -71,6 +80,13 @@ export function applySecurityHeaders(app) {
   app.disable('x-powered-by');
   app.use(createCspNonce);
   app.use(buildHelmetMiddleware());
+  app.use((req, res, next) => {
+    res.setHeader(
+      'Permissions-Policy',
+      'camera=(), microphone=(), geolocation=()'
+    );
+    next();
+  });
 }
 
 export default applySecurityHeaders;

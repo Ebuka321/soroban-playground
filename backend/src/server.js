@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 import express from 'express';
-import http from 'http';
-import https from 'https';
 import cors from 'cors';
 import morgan from 'morgan';
 import fs from 'fs';
@@ -12,8 +10,14 @@ import cookieParser from 'cookie-parser';
 import { fileURLToPath } from 'url';
 
 import config from './config/index.js';
+import { validateEnv } from './config/env.js';
 import { corsOptions } from './config/cors.js';
-import { applyServerTuning } from './config/http2Config.js';
+import {
+  applyServerTuning,
+  createAlpnServer,
+  attachAcmeHttp01,
+  watchTlsCertificates,
+} from './config/http2Config.js';
 import { http2PushMiddleware } from './middleware/http2Push.js';
 import apiRouter from './routes/api.js';
 import authRoute from './routes/auth.js';
@@ -39,6 +43,8 @@ import eventsV1Route from './routes/v1/events.js';
 import credentialsRoute from './routes/credentials.js';
 import credentialRotationService from './services/credentialRotationService.js';
 import redisService from './services/redisService.js';
+import cacheInvalidator from './services/cacheInvalidator.js';
+import kmsService from './services/kmsService.js';
 import { setupGraphQL } from './graphql/index.js';
 import {
   initializeDatabase,
@@ -77,16 +83,36 @@ import corsAdminRoute from './routes/corsAdmin.js';
 import serviceRegistryRoute from './routes/serviceRegistry.js';
 import batchSubmitterRoute from './routes/batchSubmitter.js';
 import { setupSwagger } from './docs/swagger.js';
+import { negotiateApiVersion } from './middleware/apiVersioning.js';
+import { deprecationHeaders } from './middleware/deprecationHeaders.js';
 
 const _filename = fileURLToPath(import.meta.url);
 const _dirname = path.dirname(_filename);
 
-const app = express();
-let httpServer = http.createServer(app);
-applyServerTuning(httpServer); // HTTP/2: keep-alive + headers-timeout tuning
-let server;
+if (process.env.NODE_ENV !== 'test') {
+  try {
+    validateEnv();
+  } catch (err) {
+    console.error('Environment validation failed:');
+    if (err && err.errors) {
+      for (const [key, validationError] of Object.entries(err.errors)) {
+        console.error(
+          `  - ${key}: ${validationError.message || validationError}`
+        );
+      }
+    } else {
+      console.error(err.message);
+    }
+    process.exit(1);
+  }
+}
 
-// TLS/SSL Hardening configuration
+const app = express();
+app.set('trust proxy', ['loopback', 'linklocal', 'uniquelocal', '10.0.0.0/8']);
+let server;
+let websocketRedisClient = null;
+
+// TLS/SSL Hardening configuration — HTTP/2 ALPN prefers h2, falls back to 1.1.
 const httpsOptions = {
   minVersion: 'TLSv1.2',
   maxVersion: 'TLSv1.3',
@@ -123,22 +149,42 @@ try {
     hasCertificates = true;
   }
 } catch (err) {
-  console.warn('[SSL] Could not load certificates, falling back to HTTP:', err.message);
+  console.warn(
+    '[SSL] Could not load certificates, falling back to HTTP:',
+    err.message
+  );
 }
 
-// Fallback to HTTP if no certs are provided, otherwise use HTTPS
-server = hasCertificates ? https.createServer(httpsOptions, app) : httpServer;
+// Let's Encrypt HTTP-01 challenges must be reachable before HSTS/rate limits.
+export const acmeChallengeStore = attachAcmeHttp01(app);
+
+// Fallback to HTTP/1.1 if no certs are provided, otherwise HTTP/2 + TLS 1.3 via ALPN.
+server = createAlpnServer(app, hasCertificates ? httpsOptions : null);
+applyServerTuning(server);
+let stopCertificateWatch = () => {};
+if (hasCertificates) {
+  stopCertificateWatch = watchTlsCertificates(server, {
+    keyPath: process.env.SSL_KEY_PATH || path.join(_dirname, 'key.pem'),
+    certPath: process.env.SSL_CERT_PATH || path.join(_dirname, 'cert.pem'),
+    intervalMs: Number(process.env.TLS_RELOAD_INTERVAL_MS) || 60_000,
+  });
+}
 const PORT = process.env.PORT || 5000;
 
 // Basic middleware
 applyDdosProtection(app);
 applySecurityHeaders(app);
+app.use(rateLimitMiddleware('global'));
 app.use(morgan('combined'));
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 app.use(compressionMiddleware);
 app.use(http2PushMiddleware);
+
+// Apply the Redis-backed global limiter before any API route is dispatched.
+// Route-specific compile/deploy limits remain available through the factory.
+app.use(rateLimitMiddleware('global'));
 
 // Strict Transport Security (HSTS) headers
 app.use((req, res, next) => {
@@ -186,7 +232,12 @@ app.use('/api/fee-engine', feeEngineRoute);
 app.use('/api/feature-flags', featureFlagsRoute);
 app.use('/api/webhooks', webhooksRoute);
 app.use('/api/cors-whitelist', corsAdminRoute);
-app.use('/api/v1/events', eventsV1Route);
+app.use(
+  '/api/v1/events',
+  negotiateApiVersion({ uriVersion: 'v1' }),
+  deprecationHeaders,
+  eventsV1Route
+);
 app.use('/api/registry', serviceRegistryRoute);
 app.use('/api/batch', batchSubmitterRoute);
 app.use('/api/credentials', credentialsRoute);
@@ -196,8 +247,16 @@ app.use('/api/backup', backupRoute);
 app.use('/api/auth', authRoute);
 app.use('/api/background-jobs', backgroundJobsRoute);
 
-if (config.app?.env === 'development' || process.env.NODE_ENV === 'development') {
-  app.use('/admin/queues', queueDashboard);
+if (
+  config.app?.env === 'development' ||
+  process.env.NODE_ENV === 'development'
+) {
+  app.use('/admin/queues', (req, res, next) => {
+    if (queueDashboard) {
+      return queueDashboard(req, res, next);
+    }
+    res.status(503).json({ error: 'Queue dashboard initializing' });
+  });
 }
 
 app.use('/api/prediction-market', predictionMarketRoute);
@@ -254,7 +313,25 @@ let ledgerSyncServiceInstance = null;
 // Initialize Database & Boot Services
 initializeDatabase()
   .then(async (db) => {
-    setupWebsocketServer(server);
+    await runStartupMigrations().catch((err) =>
+      console.warn('[StartupMigrations] Warning:', err.message)
+    );
+    if (
+      redisService.client?.duplicate &&
+      redisService.client.status === 'ready'
+    ) {
+      websocketRedisClient = redisService.client.duplicate();
+      websocketRedisClient.on('error', () => {});
+      if (websocketRedisClient.status === 'wait') {
+        await websocketRedisClient.connect().catch(() => {});
+      }
+    }
+    setupWebsocketServer(server, {
+      heartbeatInterval: 30000,
+      maxConnectionsPerIp: 10,
+      redisClient: redisService.client,
+      redisSubClient: websocketRedisClient || redisService.client,
+    });
     await initializeCompileService().catch((err) =>
       console.error('[CompileService] Initialization error:', err)
     );
@@ -266,13 +343,22 @@ initializeDatabase()
     startWebhookDispatcher();
     setupCredentialRotation();
     initializeQueues();
+    cacheInvalidator
+      .start()
+      .catch((err) =>
+        console.warn('[CacheInvalidator] start failed:', err.message)
+      );
+    kmsService.start();
 
     if (process.env.LEDGER_SYNC_ENABLED === 'true') {
       ledgerSyncServiceInstance = new LedgerSyncService({ db });
       ledgerSyncServiceInstance.start();
     }
 
-    if (process.env.NODE_ENV !== 'test') {
+    if (
+      process.env.NODE_ENV !== 'test' ||
+      process.env.LISTEN_IN_TEST === 'true'
+    ) {
       server.listen(PORT, () => {
         const protocol = hasCertificates ? 'https' : 'http';
         console.log(
@@ -309,6 +395,9 @@ async function gracefulShutdown(signal) {
     console.log('[Shutdown] Stopping background workers...');
     stopCleanupWorker();
     stopWebhookDispatcher();
+    stopCertificateWatch();
+    cacheInvalidator.stop().catch(() => {});
+    kmsService.stop();
     if (ledgerSyncServiceInstance) ledgerSyncServiceInstance.stop();
     await oracleWorkerPool.stop();
     credentialRotationService.stop();
@@ -319,22 +408,34 @@ async function gracefulShutdown(signal) {
       console.error('[Shutdown] Error closing BullMQ queues:', err.message);
     }
 
-    // 2. Stop accepting new HTTP requests
-    console.log('[Shutdown] Stopping HTTP server...');
-    await new Promise((resolve) => server.close(resolve));
-
-    // 3. Terminate WebSockets cleanly
+    // 2. Terminate WebSockets cleanly
     console.log('[Shutdown] Terminating WebSocket connections...');
     if (typeof closeWebsocketServer === 'function') {
       await closeWebsocketServer();
     }
 
+    if (websocketRedisClient && websocketRedisClient.status !== 'end') {
+      try {
+        await websocketRedisClient.quit();
+      } catch (_) {
+        websocketRedisClient.disconnect();
+      }
+    }
+
+    // 3. Stop accepting new HTTP requests
+    console.log('[Shutdown] Stopping HTTP server...');
+    await new Promise((resolve) => server.close(resolve));
+
     // 4. Drain database pool and close Redis connections
     console.log('[Shutdown] Closing database and Redis connections...');
     await closeDatabase();
 
-    if (redisService.client) {
-      await redisService.client.quit();
+    if (redisService.client && redisService.client.status !== 'end') {
+      try {
+        await redisService.client.quit();
+      } catch (_) {
+        redisService.client.disconnect();
+      }
     }
 
     console.log('[Shutdown] Graceful shutdown completed cleanly.');

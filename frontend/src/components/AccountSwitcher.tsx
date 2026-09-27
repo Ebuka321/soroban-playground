@@ -5,19 +5,41 @@ import { User, Copy, Check, ChevronDown, LogOut } from "lucide-react";
 import { useWallet } from "./providers/WalletProvider";
 
 export default function AccountSwitcher() {
-  const { activeAccount, allAccounts, switchAccount, disconnect, activeWallet } = useWallet();
+  const {
+    activeAccount,
+    allAccounts,
+    switchAccount,
+    disconnect,
+    activeWallet,
+  } = useWallet();
   const [copied, setCopied] = React.useState(false);
 
-  if (!activeAccount) return null;
+  if (!activeAccount)
+    return (
+      <div className="rounded-2xl border border-white/8 bg-white/5 overflow-hidden p-4">
+        <p className="text-sm text-slate-400">No active account connected.</p>
+      </div>
+    );
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const copyToClipboard = async (text: string) => {
+    try {
+      if (!navigator?.clipboard || !navigator.clipboard.writeText) {
+        console.warn("Clipboard API not available");
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error("Failed to copy address to clipboard", e);
+    }
   };
 
-  const shortAddress = (address: string) => 
-    `${address.slice(0, 6)}...${address.slice(-6)}`;
+  const shortAddress = (address?: string) => {
+    if (!address || typeof address !== "string") return "-";
+    if (address.length <= 12) return address;
+    return `${address.slice(0, 6)}...${address.slice(-6)}`;
+  };
 
   return (
     <div className="rounded-2xl border border-white/8 bg-white/5 overflow-hidden">
@@ -30,7 +52,9 @@ export default function AccountSwitcher() {
             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
               Active {activeWallet} Account
             </p>
-            <p className="font-mono text-sm text-white">{shortAddress(activeAccount)}</p>
+            <p className="font-mono text-sm text-white">
+              {shortAddress(activeAccount)}
+            </p>
           </div>
         </div>
         <div className="flex gap-2">
@@ -39,7 +63,11 @@ export default function AccountSwitcher() {
             className="p-2 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
             title="Copy address"
           >
-            {copied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
+            {copied ? (
+              <Check size={16} className="text-emerald-400" />
+            ) : (
+              <Copy size={16} />
+            )}
           </button>
           <button
             onClick={disconnect}
@@ -55,7 +83,7 @@ export default function AccountSwitcher() {
         <p className="px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">
           Connected Accounts
         </p>
-        {allAccounts.map((account) => (
+        {(Array.isArray(allAccounts) ? allAccounts : []).map((account) => (
           <button
             key={account.address}
             onClick={() => switchAccount(account.address)}
@@ -70,10 +98,11 @@ export default function AccountSwitcher() {
           </button>
         ))}
       </div>
-      
+
       <div className="px-5 py-3 bg-slate-900/50">
         <p className="text-[11px] text-slate-400 italic">
-          Tip: Change active account in your {activeWallet} extension to see more accounts.
+          Tip: Change active account in your {activeWallet} extension to see
+          more accounts.
         </p>
       </div>
     </div>

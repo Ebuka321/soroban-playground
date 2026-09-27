@@ -1,11 +1,17 @@
 // Copyright (c) 2026 StellarDevTools
 // SPDX-License-Identifier: MIT
 
-import sorobanRpcManager, { CIRCUIT_STATES } from '../src/services/sorobanRpcManager.js';
+import sorobanRpcManager, {
+  CIRCUIT_STATES,
+} from '../src/services/sorobanRpcManager.js';
 
 describe('SorobanRpcManager Circuit Breaker', () => {
   beforeEach(() => {
     sorobanRpcManager.reset();
+  });
+
+  afterAll(() => {
+    sorobanRpcManager.stopHealthChecks();
   });
 
   it('initializes with default endpoints and CLOSED circuit breaker state', () => {
@@ -19,7 +25,10 @@ describe('SorobanRpcManager Circuit Breaker', () => {
     const mockCall = jest.fn().mockResolvedValue('ledger-12345');
     const result = await sorobanRpcManager.executeRpcCall(mockCall);
     expect(result).toBe('ledger-12345');
-    expect(mockCall).toHaveBeenCalledWith(sorobanRpcManager.activeEndpoint.url);
+    expect(mockCall).toHaveBeenCalledWith(
+      sorobanRpcManager.activeEndpoint.url,
+      expect.objectContaining({})
+    );
   });
 
   it('fails over to next fallback endpoint when primary endpoint fails', async () => {
@@ -37,7 +46,9 @@ describe('SorobanRpcManager Circuit Breaker', () => {
   });
 
   it('trips circuit breaker OPEN after consecutive failures threshold', async () => {
-    const failingCall = jest.fn().mockRejectedValue(new Error('503 Service Unavailable'));
+    const failingCall = jest
+      .fn()
+      .mockRejectedValue(new Error('503 Service Unavailable'));
 
     for (let i = 0; i < 3; i++) {
       try {
@@ -48,7 +59,9 @@ describe('SorobanRpcManager Circuit Breaker', () => {
     }
 
     const status = sorobanRpcManager.getStatus();
-    expect(status.endpoints.some((ep) => ep.state === CIRCUIT_STATES.OPEN)).toBe(true);
+    expect(
+      status.endpoints.some((ep) => ep.state === CIRCUIT_STATES.OPEN)
+    ).toBe(true);
   });
 
   it('resets circuit breaker state when reset() is invoked', async () => {
@@ -61,5 +74,23 @@ describe('SorobanRpcManager Circuit Breaker', () => {
     expect(status.activeEndpoint).toBe(sorobanRpcManager.endpoints[0].url);
     expect(status.circuitBreakerState).toBe(CIRCUIT_STATES.CLOSED);
     expect(status.endpoints[0].failCount).toBe(0);
+  });
+
+  it('records a healthy endpoint after getHealth and getLatestLedger succeed', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: { status: 'healthy', sequence: 123 } }),
+    });
+
+    try {
+      const endpoint = sorobanRpcManager.endpoints[0];
+      await sorobanRpcManager.checkEndpointHealth(endpoint);
+      expect(endpoint.isHealthy).toBe(true);
+      expect(endpoint.latestLedger).toBe(123);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 });

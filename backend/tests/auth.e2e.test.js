@@ -21,7 +21,9 @@ jest.mock('../src/services/redisService.js', () => ({
   __esModule: true,
   default: {
     isConnected: true,
-    get: jest.fn().mockImplementation(async (key) => mockStore.get(key) || null),
+    get: jest
+      .fn()
+      .mockImplementation(async (key) => mockStore.get(key) || null),
     set: jest.fn().mockImplementation(async (key, value) => {
       mockStore.set(key, value);
       return 'OK';
@@ -30,6 +32,17 @@ jest.mock('../src/services/redisService.js', () => ({
       const existed = mockStore.has(key);
       mockStore.delete(key);
       return existed ? 1 : 0;
+    }),
+    del: jest.fn().mockImplementation(async (key) => {
+      const existed = mockStore.has(key);
+      mockStore.delete(key);
+      return existed ? 1 : 0;
+    }),
+    checkRateLimit: jest.fn().mockResolvedValue({
+      allowed: true,
+      remaining: 100,
+      resetTime: Date.now() + 60000,
+      total: 1,
     }),
     client: {
       quit: jest.fn().mockResolvedValue('OK'),

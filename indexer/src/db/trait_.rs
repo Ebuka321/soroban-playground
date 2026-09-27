@@ -2,17 +2,17 @@ use async_trait::async_trait;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Event {
     pub id: String,
     pub contract_id: String,
-    pub ledger: u32,
+    pub ledger: i64,
     pub ledger_closed_at: String,
     pub event_type: String,
     pub data: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Quorum {
     pub id: String,
     pub quorum_type: String,
@@ -24,7 +24,7 @@ pub struct Quorum {
     pub expires_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Vote {
     pub id: String,
     pub quorum_id: String,
@@ -34,12 +34,26 @@ pub struct Vote {
     pub timestamp: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Oracle {
     pub id: String,
     pub name: String,
     pub reputation: i32,
     pub active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Ledger {
+    pub sequence: u32,
+    pub ledger_hash: String,
+    pub parent_ledger_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerInsert {
+    Inserted,
+    Duplicate,
+    Reorg { fork_sequence: u32 },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -84,6 +98,12 @@ pub trait Database: Send + Sync {
     async fn get_audit_trail(&self, limit: usize, offset: usize) -> Result<Vec<AuditEntry>>;
     async fn get_last_audit_entry(&self) -> Result<Option<AuditEntry>>;
     async fn get_audit_entry(&self, id: &str) -> Result<Option<AuditEntry>>;
+
+    // Ledger continuity & reorg methods
+    async fn get_ledger_tip(&self) -> Result<Option<Ledger>>;
+    async fn save_ledger(&self, ledger: &Ledger) -> Result<LedgerInsert>;
+    async fn rollback_from_ledger(&self, sequence: u32) -> Result<()>;
+    async fn find_ledger_gaps(&self) -> Result<Vec<(u32, u32)>>;
 }
 
 
